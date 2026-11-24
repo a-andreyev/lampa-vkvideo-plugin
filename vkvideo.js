@@ -498,7 +498,11 @@
         document.head.appendChild(script);
     }
 
-        // Получение анонимного токена напрямую из VK API с многоуровневым транспортом
+    function androidBridge() {
+        var android = Lampa.Android && typeof Lampa.Android.httpReq === 'function' ? Lampa.Android : window.Android;
+        return android && typeof android.httpReq === 'function' ? android : null;
+    }
+
     function getToken(force, callback) {
         var saved = Lampa.Storage.get(TOKEN_KEY, '');
         var old = saved && saved.token ? saved.token : '';
@@ -570,7 +574,7 @@
             xhr.send();
         }
 
-        var android = Lampa.Android && typeof Lampa.Android.httpReq === 'function' ? Lampa.Android : window.Android;
+        var android = androidBridge();
 
         function viaAndroid(next) {
             var fired = false;
@@ -676,6 +680,40 @@
         }, wait);
     }
 
+    function nativeVideoGet(android, params, callback) {
+        var timer = setTimeout(function () {
+            finish(new Error(tr('vkvideo_timeout', 'VK не отвечает')));
+        }, TIMEOUT);
+
+        function finish(err, data) {
+            if (timer === null) return;
+            clearTimeout(timer);
+            timer = null;
+            callback(err, data);
+        }
+
+        var url = API_URL + 'video.get?' + query(extend({v: API_VERSION, client_id: CLIENT_ID, lang: 'ru'}, params));
+        try {
+            android.httpReq({url: url, timeout: TIMEOUT}, {
+                complite: function (data) {
+                    if (typeof data === 'string') {
+                        try {
+                            data = JSON.parse(data);
+                        } catch (e) {
+                            return finish(e);
+                        }
+                    }
+                    finish(null, data);
+                },
+                error: function () {
+                    finish(new Error(tr('vkvideo_no_connection', 'Нет связи с VK')));
+                }
+            });
+        } catch (e) {
+            finish(e);
+        }
+    }
+
     // Вызовы VK API с автоматическим обновлением протухшего токена
     function api(method, params, callback) {
         var direct = method.indexOf('catalog.') === 0;
@@ -687,7 +725,11 @@
                 if (err) return callback(err);
 
                 enqueueApi(function (releaseQueue) {
-                    jsonp(name, extend({access_token: token}, args), function (err, data) {
+                    var android = method === 'video.get' ? androidBridge() : null;
+                    if (android) nativeVideoGet(android, extend({access_token: token}, params), done);
+                    else jsonp(name, extend({access_token: token}, args), done);
+
+                    function done(err, data) {
                         releaseQueue();
 
                         if (err) return callback(err);
@@ -706,7 +748,7 @@
                         }
 
                         callback(null, data ? data.response : null);
-                    });
+                    }
                 });
             });
         }
