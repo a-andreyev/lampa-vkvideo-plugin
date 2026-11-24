@@ -570,6 +570,8 @@
             xhr.send();
         }
 
+        var android = Lampa.Android && typeof Lampa.Android.httpReq === 'function' ? Lampa.Android : window.Android;
+
         function viaAndroid(next) {
             var fired = false;
             var timer;
@@ -589,7 +591,7 @@
             }, 4500);
 
             try {
-                window.Android.httpReq({url: directUrl, timeout: 4000}, {
+                android.httpReq({url: directUrl, timeout: 4000}, {
                     complite: function (res) {
                         step(parse(res));
                     },
@@ -613,7 +615,7 @@
         var steps = [];
         var androidWV = location.protocol === 'http:' && /Android/i.test(navigator.userAgent);
 
-        if (window.Android && window.Android.httpReq) steps.push(viaAndroid);
+        if (android && typeof android.httpReq === 'function') steps.push(viaAndroid);
         steps.push(viaFallback);
         if (!androidWV) steps.push(viaDirect);
 
