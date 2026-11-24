@@ -2260,6 +2260,7 @@ function openMore(more, title) {
         var title = tr('vkvideo_title', MENU_TITLE);
         var searchSource = {
             title: title,
+            params: {},
             search: function (params, oncomplite) {
                 var queryStr = (params.query || '').trim();
 
