@@ -1423,6 +1423,25 @@ function pickImage(list, min) {
         return /Android|SmartTV|SMART-TV|Tizen|Web0S/i.test(navigator.userAgent || '');
     }
 
+    function registerDirectMp4() {
+        if (!Lampa.PlayerVideo || !Lampa.PlayerVideo.registerTube || !Lampa.Player || !Lampa.Player.playdata) return;
+
+        Lampa.PlayerVideo.registerTube({
+            name: 'VK MP4',
+            verify: function (src) {
+                var data = Lampa.Player.playdata();
+                return !!(data && data.vkMp4Urls && data.vkMp4Urls.indexOf(src) !== -1);
+            },
+            create: function (ready) {
+                var video = document.createElement('video');
+                video.className = 'player-video__video';
+                video.setAttribute('playsinline', '');
+                ready(video);
+                return video;
+            }
+        });
+    }
+
     function playDirect(video) {
         if (Date.now() < play_lock_until) return;
         play_lock_until = Date.now() + 5000;
@@ -1445,6 +1464,12 @@ function pickImage(list, min) {
                     url: qData.url,
                     title: target.title || video.title
                 };
+
+                if (lampaPlayer === 'inner') {
+                    playData.vkMp4Urls = MP4_ORDER.map(function (quality) {
+                        return files['mp4_' + quality];
+                    }).filter(Boolean);
+                }
 
                 if (qData.qualityMap && Object.keys(qData.qualityMap).length > 1) {
                     playData.quality = qData.qualityMap;
@@ -2451,6 +2476,7 @@ function routeHistory() {
         addMenu();
         addSettings();
         addSearchSource();
+        registerDirectMp4();
     }
 
     function start() {
