@@ -1442,6 +1442,119 @@ function pickImage(list, min) {
         });
     }
 
+    var nativeHlsRegistered = false;
+
+    function registerNativeHls() {
+        if (nativeHlsRegistered) return true;
+        var hls = window.Hls;
+        if (!hls || !hls.DefaultConfig || !Lampa.Player || !Lampa.Player.playdata) return false;
+        var Loader = hls.DefaultConfig.loader;
+        if (typeof Loader !== 'function') return false;
+
+        hls.DefaultConfig.loader = function (config) {
+            var loader = new Loader(config);
+            var load = loader.load;
+            var abort = loader.abort;
+            var destroy = loader.destroy;
+            var age = loader.getCacheAge;
+            var header = loader.getResponseHeader;
+            var request = null;
+
+            function cancel() {
+                if (!request || !request.pending) return false;
+                request.pending = false;
+                clearTimeout(request.timer);
+                loader.stats.aborted = true;
+                return true;
+            }
+
+            loader.load = function (context, policy, callbacks) {
+                var data = Lampa.Player.playdata();
+                var android = data && data.vkNativeHls && androidBridge();
+                if (!android || !/^https:\/\/(?:[a-z0-9-]+\.)+(?:vkuser\.net|okcdn\.ru|vkuservideo\.net|vkvideo\.net)\//i.test(context.url)) {
+                    return load.apply(loader, arguments);
+                }
+
+                var timeout = Number(policy.timeout) || TIMEOUT;
+                var stats = loader.stats;
+                var binary = context.responseType === 'arraybuffer';
+                var options = {url: context.url, timeout: timeout, returnHeaders: true, dataType: binary ? 'base64' : 'json'};
+                if (context.rangeEnd > context.rangeStart) {
+                    options.headers = {Range: 'bytes=' + context.rangeStart + '-' + (context.rangeEnd - 1)};
+                }
+
+                stats.loading.start = performance.now();
+                loader.context = context;
+                request = {pending: true, context: context, callbacks: callbacks, headers: {}};
+                request.timer = setTimeout(function () {
+                    if (cancel()) callbacks.onTimeout(stats, context, null);
+                }, timeout);
+
+                function fail(error) {
+                    if (!request.pending) return;
+                    request.pending = false;
+                    clearTimeout(request.timer);
+                    callbacks.onError({code: Number(error && error.status) || 0, text: (error && error.message) || 'VK HLS request failed'}, context, null, stats);
+                }
+
+                try {
+                    android.httpReq(options, {complite: function (response) {
+                        if (!request.pending) return;
+                        var body;
+                        try {
+                            if (typeof response === 'string') response = JSON.parse(response);
+                            if (!response || typeof response.body !== 'string' || !response.body || response.body === '[Response too large, skipped]') {
+                                throw new Error('Invalid VK HLS response');
+                            }
+                            body = response.body;
+                            if (binary) {
+                                if (response.encoding !== 'base64') throw new Error('Android bridge does not support binary HLS');
+                                var bytes = atob(body);
+                                var buffer = new Uint8Array(bytes.length);
+                                for (var i = 0; i < bytes.length; i++) buffer[i] = bytes.charCodeAt(i);
+                                body = buffer.buffer;
+                            }
+                        } catch (e) {
+                            return fail(e);
+                        }
+                        request.pending = false;
+                        clearTimeout(request.timer);
+                        request.headers = response.headers || {};
+                        stats.loading.end = performance.now();
+                        stats.loading.first = stats.loading.start;
+                        stats.loaded = stats.total = binary ? body.byteLength : body.length;
+                        stats.bwEstimate = 8000 * stats.total / Math.max(1, stats.loading.end - stats.loading.start);
+                        if (callbacks.onProgress) callbacks.onProgress(stats, context, body, null);
+                        if (!stats.aborted) callbacks.onSuccess({url: response.currentUrl || context.url, data: body, code: options.headers && request.headers['content-range'] ? 206 : 200}, stats, context, null);
+                    }, error: fail});
+                } catch (e) {
+                    fail(e);
+                }
+            };
+
+            loader.abort = function () {
+                if (!request) return abort.apply(loader, arguments);
+                if (cancel() && request.callbacks.onAbort) request.callbacks.onAbort(loader.stats, request.context, null);
+            };
+            loader.destroy = function () {
+                if (!request) return destroy.apply(loader, arguments);
+                cancel();
+                loader.stats.aborted = true;
+            };
+            loader.getCacheAge = function () {
+                if (!request) return age ? age.apply(loader, arguments) : null;
+                return request.headers.age == null ? null : Number(request.headers.age);
+            };
+            loader.getResponseHeader = function (name) {
+                if (!request) return header ? header.apply(loader, arguments) : null;
+                return request.headers[name.toLowerCase()] || null;
+            };
+            return loader;
+        };
+        nativeHlsRegistered = true;
+        return true;
+    }
+
     function playDirect(video) {
         if (Date.now() < play_lock_until) return;
         play_lock_until = Date.now() + 5000;
@@ -1469,6 +1582,10 @@ function pickImage(list, min) {
                     playData.vkMp4Urls = MP4_ORDER.map(function (quality) {
                         return files['mp4_' + quality];
                     }).filter(Boolean);
+                    if (files.hls && androidBridge() && registerNativeHls()) {
+                        playData.vkNativeHls = true;
+                        playData.hls_type = 'hlsjs';
+                    }
                 }
 
                 if (qData.qualityMap && Object.keys(qData.qualityMap).length > 1) {
