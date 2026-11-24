@@ -1468,24 +1468,33 @@ function pickImage(list, min) {
                 return true;
             }
 
+            var VK_CDN = /^https:\/\/(?:[a-z0-9-]+\.)+(?:vkuser\.net|okcdn\.ru|vkuservideo\.net|vkvideo\.net)\//i;
+            var CHUNK_SIZE = 1024 * 1024;
+
+            function decodeBase64(value) {
+                var bytes = atob(value);
+                var buffer = new Uint8Array(bytes.length);
+                for (var i = 0; i < bytes.length; i++) buffer[i] = bytes.charCodeAt(i);
+                return buffer;
+            }
+
+            function parseResponse(response) {
+                if (typeof response === 'string') response = JSON.parse(response);
+                if (!response || typeof response.body !== 'string' || !response.body) throw new Error('Empty VK HLS response');
+                return response;
+            }
+
             loader.load = function (context, policy, callbacks) {
                 var data = Lampa.Player.playdata();
                 var android = data && data.vkNativeHls && androidBridge();
-                if (!android || !/^https:\/\/(?:[a-z0-9-]+\.)+(?:vkuser\.net|okcdn\.ru|vkuservideo\.net|vkvideo\.net)\//i.test(context.url)) {
-                    return load.apply(loader, arguments);
-                }
+                if (!android || !VK_CDN.test(context.url)) return load.apply(loader, arguments);
 
                 var timeout = Number(policy.timeout) || TIMEOUT;
                 var stats = loader.stats;
                 var binary = context.responseType === 'arraybuffer';
-                var options = {url: context.url, timeout: timeout, returnHeaders: true, dataType: binary ? 'base64' : 'json'};
-                if (context.rangeEnd > context.rangeStart) {
-                    options.headers = {Range: 'bytes=' + context.rangeStart + '-' + (context.rangeEnd - 1)};
-                }
-
-                stats.loading.start = performance.now();
                 loader.context = context;
                 request = {pending: true, context: context, callbacks: callbacks, headers: {}};
+                stats.loading.start = performance.now();
                 request.timer = setTimeout(function () {
                     if (cancel()) callbacks.onTimeout(stats, context, null);
                 }, timeout);
@@ -1497,41 +1506,81 @@ function pickImage(list, min) {
                     callbacks.onError({code: Number(error && error.status) || 0, text: (error && error.message) || 'VK HLS request failed'}, context, null, stats);
                 }
 
-                try {
-                    android.httpReq(options, {complite: function (response) {
+                function done(body, headers, code) {
+                    if (!request.pending) return;
+                    request.pending = false;
+                    clearTimeout(request.timer);
+                    request.headers = headers;
+                    stats.loading.end = performance.now();
+                    stats.loading.first = stats.loading.start;
+                    stats.loaded = stats.total = binary ? body.byteLength : body.length;
+                    stats.bwEstimate = 8000 * stats.total / Math.max(1, stats.loading.end - stats.loading.start);
+                    if (callbacks.onProgress) callbacks.onProgress(stats, context, body, null);
+                    if (!stats.aborted) callbacks.onSuccess({url: context.url, data: body, code: code}, stats, context, null);
+                }
+
+                function http(params, success) {
+                    try {
+                        android.httpReq(params, {complite: function (response) {
+                            if (!request.pending) return;
+                            try {
+                                success(parseResponse(response));
+                            } catch (e) {
+                                fail(e);
+                            }
+                        }, error: fail});
+                    } catch (e) {
+                        fail(e);
+                    }
+                }
+
+                function loadChunks(total) {
+                    var chunks = Math.ceil(total / CHUNK_SIZE);
+                    var buffer = new Uint8Array(total);
+                    var offset = 0;
+
+                    function next() {
                         if (!request.pending) return;
-                        var body;
-                        try {
-                            if (typeof response === 'string') response = JSON.parse(response);
-                            if (!response || typeof response.body !== 'string' || !response.body || response.body === '[Response too large, skipped]') {
-                                throw new Error('Invalid VK HLS response');
-                            }
-                            body = response.body;
-                            if (binary) {
-                                if (response.encoding !== 'base64') throw new Error('Android bridge does not support binary HLS');
-                                var bytes = atob(body);
-                                var buffer = new Uint8Array(bytes.length);
-                                for (var i = 0; i < bytes.length; i++) buffer[i] = bytes.charCodeAt(i);
-                                body = buffer.buffer;
-                            }
-                        } catch (e) {
-                            return fail(e);
+                        var start = offset;
+                        var end = Math.min(total, start + CHUNK_SIZE);
+                        http({
+                            url: context.url,
+                            timeout: timeout,
+                            returnHeaders: true,
+                            dataType: 'base64',
+                            headers: {Range: 'bytes=' + start + '-' + (end - 1)}
+                        }, function (response) {
+                            if (!request.pending) return;
+                            if (response.body === '[Response too large, skipped]') return fail(new Error('VK CDN rejected chunk'));
+                            if (response.encoding !== 'base64') return fail(new Error('Android bridge does not support binary HLS'));
+                            var bytes = decodeBase64(response.body);
+                            if (bytes.length !== end - start) return fail(new Error('Incomplete VK HLS chunk'));
+                            buffer.set(bytes, start);
+                            offset = end;
+                            if (offset >= total) done(buffer.buffer, response.headers || {}, 200);
+                            else next();
+                        });
+                    }
+
+                    next();
+                }
+
+                if (binary) {
+                    http({url: context.url, timeout: timeout, returnHeaders: true, dataType: 'base64'}, function (response) {
+                        if (response.body === '[Response too large, skipped]') {
+                            var total = parseInt((response.headers || {})['content-length'], 10);
+                            if (!isFinite(total) || total <= 0) return fail(new Error('VK HLS segment size unknown'));
+                            return loadChunks(total);
                         }
-                        request.pending = false;
-                        clearTimeout(request.timer);
-                        request.headers = response.headers || {};
-                        stats.loading.end = performance.now();
-                        stats.loading.first = stats.loading.start;
-                        stats.loaded = stats.total = binary ? body.byteLength : body.length;
-                        stats.bwEstimate = 8000 * stats.total / Math.max(1, stats.loading.end - stats.loading.start);
-                        if (callbacks.onProgress) callbacks.onProgress(stats, context, body, null);
-                        if (!stats.aborted) callbacks.onSuccess({url: response.currentUrl || context.url, data: body, code: options.headers && request.headers['content-range'] ? 206 : 200}, stats, context, null);
-                    }, error: fail});
-                } catch (e) {
-                    fail(e);
+                        if (response.encoding !== 'base64') return fail(new Error('Android bridge does not support binary HLS'));
+                        done(decodeBase64(response.body).buffer, response.headers || {}, 200);
+                    });
+                } else {
+                    http({url: context.url, timeout: timeout, returnHeaders: true, dataType: 'json'}, function (response) {
+                        done(response.body, response.headers || {}, 200);
+                    });
                 }
             };
-
             loader.abort = function () {
                 if (!request) return abort.apply(loader, arguments);
                 if (cancel() && request.callbacks.onAbort) request.callbacks.onAbort(loader.stats, request.context, null);
