@@ -2264,6 +2264,10 @@ function openMore(more, title) {
             search: function (params, oncomplite) {
                 var queryStr = (params.query || '').trim();
 
+                try {
+                    queryStr = decodeURIComponent(queryStr).trim();
+                } catch (e) {}
+
                 if (!queryStr) return oncomplite([]);
 
                 api('catalog.getVideoSearch', {q: queryStr, need_blocks: 1}, function (err, res) {
